@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Supplementary data from the paper is under Elsevier/Cell Press copyright.
+# Keep local copies here for your own use, but don't commit them to a
+# public repo. Only code, docs, and small derived/synthetic artifacts
+# are tracked.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+checkpoints/*
+!checkpoints/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+.ipynb_checkpoints/
+.DS_Store
