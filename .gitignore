@@ -18,5 +18,8 @@ checkpoints/*
 outputs/*
 !outputs/.gitkeep
 
+# Result archives written by scripts/run_full.sh
+deepatm-results-*.tar.gz
+
 .ipynb_checkpoints/
 .DS_Store

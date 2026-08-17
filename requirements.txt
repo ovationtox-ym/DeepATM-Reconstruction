@@ -6,6 +6,7 @@ scipy>=1.11
 openpyxl>=3.1       # reads mmc1.xlsx
 gemmi>=0.6          # mmCIF parsing for the Ca coordinate track
 requests>=2.31
+certifi>=2024.2      # fallback trust store for the ClinVar download (src/clinvar.py)
 pygam>=0.9          # generalized additive calibration in predict.py (M7)
 matplotlib>=3.7
 tqdm>=4.66

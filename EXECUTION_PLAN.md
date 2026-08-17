@@ -138,18 +138,41 @@ The paper used **AlphaFold 3**, which is not deposited. Verified alternatives:
    current code caches it to `ca_coordinates.npy` on the first failed fetch and
    never re-tries.
 
-### 2.3 ClinVar ≥2★ subset (secondary test only)
+### 2.3 ClinVar ≥2★ subset (secondary test only) — **done**
 
-```bash
-curl -s "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz" -o data/raw/variant_summary.txt.gz
-```
+Implemented in `src/clinvar.py`; run `python -m src.clinvar`.
 
-Filter to `GeneSymbol == ATM`, `Type == single nucleotide variant`, missense,
-`ClinicalSignificance ∈ {Pathogenic, Likely pathogenic, Benign, Likely benign}`,
-`ReviewStatus ≥ 2★`. Join back to Table S1 rows by hg38 position + ref/alt. Pin
-the release date in `config.yaml` — ClinVar changes weekly and an unpinned test
-set is not a test set. Expect more than the paper's n=68: their snapshot is
-~2024, and the set has grown. Report both the raw and a size-matched result.
+Source is the **GRCh38 release VCF**, not `variant_summary.txt.gz` as this plan
+originally specified. Both carry review status, but the VCF's coordinates are
+already GRCh38 VCF-normalised, which makes the join to Table S1's
+`hg38_pos`/`Ref`/`Alt` exact rather than assembly-filtered-then-hoped-for; it is
+roughly a third of the size; and `##fileDate` pins the release without a
+separate lookup. Only the ~150 kb ATM locus is parsed.
+
+Result, against release **2026-08-08**:
+
+| | |
+|---|---|
+| ≥1★ test variants matched in ClinVar | **116 / 116** |
+| ≥2★ and still classified P/LP or B/LB | **70** (paper: 68) |
+| of which P/LP · B/LB | 45 · 25 |
+| star histogram over the 116 | 0★:1 · 1★:45 · 2★:50 · 3★:20 |
+| reclassified since Table S1's snapshot | 0 |
+
+A clean 116/116 match is itself a check on the whole reconstruction: it
+confirms the test set derived from Table S1's `ClinVar_classification` column
+really is the ClinVar-sourced set the paper describes. n=70 vs 68 is the
+expected direction and magnitude of two years of ClinVar growth (D5).
+
+The release URL, date and SHA-256 are written to
+`data/processed/clinvar_release.json` and echoed into `outputs/metrics.json`,
+so any reported ≥2★ number carries its provenance.
+
+**Size-matching is deliberately not reported here.** Drawing 68 of 70 leaves
+almost nothing to vary, so the resulting interval measures which two rows were
+dropped, not sampling uncertainty — printing it next to a real bootstrap CI
+would invite exactly the wrong comparison. The code does it only when the
+subset exceeds the target by >10%.
 
 ### 2.4 Not needed
 
@@ -387,7 +410,7 @@ where this reconstruction is knowingly not the paper.
 | D2 | Coordinates from PDB 8OXQ/7SID, not AlphaFold 3 | AF3 model not deposited; AlphaFold DB has no ATM entry (verified 404) | Unmodelled loops must be masked — exactly the gap problem the paper used AF3 to avoid |
 | D3 | Positional encoding added | Not specified in the paper; the encoder otherwise has no ordinal position sense | Likely improves fit; documents a real ambiguity in the methods |
 | D4 | dbNSFP v5.1 score versions ≠ the paper's | The paper does not pin a dbNSFP release | Small shifts in the auxiliary features |
-| D5 | ClinVar ≥2★ set pinned to a 2026 release, not the paper's ~2024 snapshot | ClinVar is versioned weekly and grows | Larger than n=68; report raw and size-matched |
+| D5 | ClinVar ≥2★ set pinned to release 2026-08-08, not the paper's ~2024 snapshot | ClinVar is versioned weekly and grows | n=70 vs the paper's 68. Size-matching is skipped as uninformative at this margin (§2.3) |
 | D6 | Random seeds, PyTorch version, embedding init | Not stated | Run-to-run variance; report seed and mean ± sd over ≥3 seeds |
 | D7 | Embeddings combined by summation | The paper says only "integrated with" | Concatenation + projection is an equally valid reading; test both |
 | D8 | Windowed attention in CPU smoke mode | Full L=3,056 attention needs GPU memory | Any windowed result is not comparable to the paper; always report the window |

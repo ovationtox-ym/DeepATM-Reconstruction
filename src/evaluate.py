@@ -210,6 +210,102 @@ def cross_validation_metrics(oof_path: Path) -> dict:
     }
 
 
+def size_matched_auroc(
+    labels: np.ndarray, scores: np.ndarray, n_target: int, n_draws: int = 1000, seed: int = 0
+) -> dict:
+    """auROC distribution over random subsamples of size `n_target`.
+
+    The >=2-star set here is larger than the paper's n=68, because ClinVar has
+    grown since their snapshot (D5). A bigger test set is not automatically a
+    fairer comparison — auROC variance falls with n, so the paper's interval
+    is wider than ours for reasons that have nothing to do with either model.
+    This resamples down to their n without replacement, so the spread is
+    comparable to theirs.
+    """
+    labels, scores = np.asarray(labels), np.asarray(scores)
+    if n_target >= len(labels):
+        return {"note": f"subset already has n={len(labels)} <= target {n_target}"}
+    if len(labels) < n_target * 1.1:
+        # Drawing 68 of 70 leaves almost nothing to vary, so the resulting
+        # interval reflects which two rows were dropped rather than sampling
+        # uncertainty. Reporting it next to a real bootstrap CI would invite
+        # exactly the wrong comparison.
+        return {
+            "note": f"n={len(labels)} is within 10% of the paper's {n_target}; "
+                    "size-matching would measure subset choice, not sampling variance",
+        }
+
+    rng = np.random.default_rng(seed)
+    draws = []
+    for _ in range(n_draws):
+        idx = rng.choice(len(labels), size=n_target, replace=False)
+        if len(np.unique(labels[idx])) < 2:
+            continue
+        draws.append(roc_auc_score(labels[idx], scores[idx]))
+    if not draws:
+        return {"note": "no size-matched resample had both classes"}
+    return {
+        "n": n_target,
+        "median_auroc": float(np.median(draws)),
+        "ci_low": float(np.percentile(draws, 2.5)),
+        "ci_high": float(np.percentile(draws, 97.5)),
+        "n_draws_used": len(draws),
+    }
+
+
+def two_star_metrics(
+    test_df: pd.DataFrame,
+    preds: np.ndarray,
+    subset_path: Path,
+    release_path: Path,
+    seed: int = 0,
+    paper_n: int = 68,
+) -> dict | None:
+    """auROC on the >=2-star subset, reusing the >=1-star ensemble predictions.
+
+    The subset is a strict subset of the 116, so nothing is re-predicted — the
+    rows are selected by SNV identity and the same scores are re-scored. That
+    also guarantees the two auROCs come from one identical ensemble pass.
+
+    Labels come from `clinvar_label_current`, the classification in the pinned
+    ClinVar release, not from Table S1's older snapshot. Where they disagree,
+    the current release is the more defensible ground truth for a test set we
+    are building today; disagreements are counted in `clinvar_release.json`.
+    """
+    if not subset_path.exists():
+        return None
+
+    subset = pd.read_csv(subset_path)
+    key = ["Chrom", "hg38_pos", "Ref", "Alt"]
+    wanted = set(map(tuple, subset[key].astype({"Chrom": str, "hg38_pos": int}).to_numpy()))
+
+    keys = test_df[key].astype({"Chrom": str, "hg38_pos": int})
+    mask = np.array([tuple(row) in wanted for row in keys.to_numpy()])
+    if mask.sum() < 10:
+        return {"note": f"only {int(mask.sum())} of the test rows are in {subset_path}"}
+
+    label_by_key = dict(zip(
+        map(tuple, subset[key].astype({"Chrom": str, "hg38_pos": int}).to_numpy()),
+        subset["clinvar_label_current"].astype(int),
+    ))
+    labels = np.array([label_by_key[tuple(row)] for row in keys.to_numpy()[mask]])
+    scores = -preds[mask]
+
+    result = bootstrap_auroc(labels, scores, seed=seed)
+    result["size_matched_to_paper"] = size_matched_auroc(labels, scores, paper_n, seed=seed)
+    result["paper_n"] = paper_n
+
+    if release_path.exists():
+        with open(release_path) as fh:
+            release = json.load(fh)
+        result["clinvar_release"] = {
+            k: release[k] for k in ("source_url", "file_date", "sha256", "min_stars")
+            if k in release
+        }
+        result["n_reclassified_vs_table_s1"] = release.get("n_reclassified_vs_table_s1")
+    return result
+
+
 def clinvar_metrics(test_df: pd.DataFrame, preds: np.ndarray, seed: int = 0) -> dict:
     """auROC on the ClinVar test set, for DeepATM and each baseline score."""
     labels = test_df["clinvar_label"].to_numpy(dtype=int)
@@ -276,16 +372,48 @@ def print_report(metrics: dict) -> None:
                       f"[{_fmt(entry['ci_low'])}, {_fmt(entry['ci_high'])}]  "
                       f"coverage {entry['coverage']:.0%}")
 
-    print("\nNot yet reported: the >=2-star subset (n=68 in the paper) needs the "
-          "ClinVar variant_summary join - EXECUTION_PLAN.md 2.3.")
+    if clin is None:
+        return  # --skip-test-set: no ensemble was loaded, so neither test set ran
+
+    two = metrics.get("clinvar_2star")
+    if two is None:
+        print("\nNot reported: the >=2-star subset (n=68 in the paper). Build it with "
+              "`python -m src.clinvar`.")
+    elif two.get("auroc") is None:
+        print(f"\n>=2-star subset unavailable: {two.get('note', 'unknown reason')}")
+    else:
+        release = two.get("clinvar_release", {})
+        print(f"\nClinVar >=2-star subset (n={two['n']}, {two.get('n_positive')} P/LP; "
+              f"paper n={two.get('paper_n')})")
+        print(f"  DeepATM auROC = {_fmt(two['auroc'])} "
+              f"[{_fmt(two['ci_low'])}, {_fmt(two['ci_high'])}]")
+        matched = two.get("size_matched_to_paper", {})
+        if "median_auroc" in matched:
+            print(f"  size-matched to n={matched['n']}: median {_fmt(matched['median_auroc'])} "
+                  f"[{_fmt(matched['ci_low'])}, {_fmt(matched['ci_high'])}]  "
+                  "(spread over subset choice, not a sampling CI)")
+        elif matched.get("note"):
+            print(f"  size-matching skipped: {matched['note']}")
+        if release:
+            print(f"  ClinVar release {release.get('file_date')} (pinned)")
+        if two.get("n_reclassified_vs_table_s1"):
+            print(f"  {two['n_reclassified_vs_table_s1']} variant(s) reclassified since "
+                  "Table S1's snapshot; the current release is used")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoints", default="checkpoints/deepatm_fold*.pt")
+    # Bracketed, not `fold*.pt`: the star also matches the tagged runs, so the
+    # plain default would silently ensemble the ablation and smoke checkpoints
+    # alongside the real ones.
+    parser.add_argument("--checkpoints", default="checkpoints/deepatm_fold[0-9].pt")
     parser.add_argument("--oof", type=Path, default=None,
                         help="Out-of-fold predictions (default: outputs/oof_predictions<tag>.csv)")
     parser.add_argument("--test-csv", type=Path, default=PROCESSED_DIR / "test.csv")
+    parser.add_argument("--test-2star-csv", type=Path, default=PROCESSED_DIR / "test_2star.csv",
+                        help="Built by `python -m src.clinvar`; skipped if absent")
+    parser.add_argument("--clinvar-release", type=Path,
+                        default=PROCESSED_DIR / "clinvar_release.json")
     parser.add_argument("--tag", default="", help="Suffix matching the training run, e.g. 'nocoord'")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-test-set", action="store_true",
@@ -311,6 +439,13 @@ def main() -> None:
         preds = predict_ensemble(members, test_df, tracks, device, window_size)
 
         metrics["clinvar_1star"] = clinvar_metrics(test_df, preds, seed=args.seed)
+
+        two_star = two_star_metrics(
+            test_df, preds, args.test_2star_csv, args.clinvar_release, seed=args.seed
+        )
+        if two_star is not None:
+            metrics["clinvar_2star"] = two_star
+
         metrics["ensemble"] = {
             "n_checkpoints": len(members),
             "window_size": window_size,

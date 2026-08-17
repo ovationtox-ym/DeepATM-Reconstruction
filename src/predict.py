@@ -130,7 +130,8 @@ def load_oof(path: Path) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoints", default="checkpoints/deepatm_fold*.pt")
+    # See evaluate.py: `fold*.pt` also matches the tagged ablation checkpoints.
+    parser.add_argument("--checkpoints", default="checkpoints/deepatm_fold[0-9].pt")
     parser.add_argument("--predict-csv", type=Path, default=PROCESSED_DIR / "predict.csv")
     parser.add_argument("--oof", type=Path, default=None)
     parser.add_argument("--tag", default="", help="Suffix matching the training run")

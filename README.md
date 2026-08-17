@@ -25,10 +25,17 @@ numerical results will not exactly reproduce the paper's — see
 > out-of-fold, and the auROC sign is fixed. Every defect in §4 of that document
 > is closed.
 >
+> The ClinVar ≥2★ test subset is now built too, from a pinned release — the
+> join recovers all 116 ≥1★ test variants and yields **n = 70** against the
+> paper's 68, the two extra being ClinVar's growth since their ~2024 snapshot
+> ([D5](#deviations-from-the-paper)).
+>
 > What has **not** happened yet is a full-length, full-data training run — the
 > numbers in `outputs/` come from short windowed smoke runs on a CPU and are
 > not comparable to the paper (see [D8](#deviations-from-the-paper)). Treat the
-> code as ready and the results as not yet produced.
+> code as ready and the results as not yet produced. The run itself is a single
+> unattended command on a rented GPU, ~$3–6 and a few hours:
+> [`docs/aws-gpu-run.md`](docs/aws-gpu-run.md), then `./scripts/run_full.sh`.
 
 ## What DeepATM does
 
@@ -128,18 +135,31 @@ pip install -r requirements.txt
 pytest tests/                    # offline sanity checks; no data files needed
 
 python -m src.data_prep          # Table S1 -> train / test / predict / measured
+python -m src.clinvar            # pinned ClinVar release -> the >=2-star subset
 python -m src.train --full-length  # 5-fold CV, the paper's setting (needs a GPU)
 python -m src.evaluate           # out-of-fold correlations + auROC vs. ClinVar
 python -m src.predict            # eDA scores for the 4,421 unevaluated SNVs
 ```
 
-A CPU smoke run of the whole pipeline, which finishes in a couple of minutes
-and verifies the plumbing without claiming anything:
+Or run the whole thing unattended, which is what
+[`docs/aws-gpu-run.md`](docs/aws-gpu-run.md) walks through end to end:
 
 ```bash
-python -m src.train --epochs 2 --folds 5 --max-rows 800 --window 65
-python -m src.evaluate
-python -m src.predict
+./scripts/run_full.sh            # splits -> ClinVar -> train -> ablation
+                                 # -> evaluate -> RF baseline -> eDA -> archive
+```
+
+Training checkpoints every epoch, so an interrupted run — spot reclamation,
+dropped SSH, OOM — is continued by issuing the same command again. Completed
+folds are skipped and the in-progress fold restarts from its last epoch; a
+resumed run reproduces an uninterrupted one bit-for-bit
+(`tests/test_train.py`).
+
+A CPU smoke run of the whole pipeline, which finishes in a few minutes and
+verifies the plumbing without claiming anything:
+
+```bash
+EPOCHS=2 SMOKE=1 ./scripts/run_full.sh
 ```
 
 The two falsification checks from `EXECUTION_PLAN.md` M6 — a random forest on
@@ -261,7 +281,7 @@ alongside `EXECUTION_PLAN.md` §7.
 | D2 | Coordinates from PDB 7SID, not AlphaFold 3 | AF3 model not deposited; AlphaFold DB has no ATM entry (verified 404) | 283 of 3,056 residues unmodelled and masked — the gap problem the paper used AF3 to avoid |
 | D3 | Sinusoidal positional encoding added | Not specified in the paper; `nn.TransformerEncoder` has none, so the encoder otherwise has no ordinal sense of the sequence | Likely improves fit; documents a real ambiguity in the methods |
 | D4 | dbNSFP score versions ≠ the paper's | The paper does not pin a dbNSFP release | Small shifts in the auxiliary features |
-| D5 | ClinVar ≥2★ subset not yet built | Table S1 carries no review-status column, so this one test needs the ClinVar download | The n=68 secondary auROC is not reported |
+| D5 | ClinVar ≥2★ subset pinned to release 2026-08-08, not the paper's ~2024 snapshot | Table S1 carries no review-status column, so this test needs ClinVar itself; ClinVar is re-released weekly and grows | All 116 ≥1★ variants matched; **n=70** vs the paper's 68. Release date and SHA-256 recorded in `metrics.json` |
 | D6 | Random seeds, PyTorch version, embedding init | Not stated | Run-to-run variance; report seed and mean ± sd over ≥3 seeds |
 | D7 | Embeddings combined by summation | The paper says only "integrated with" | Concatenation + projection is an equally valid reading; untested |
 | D8 | Windowed attention in CPU smoke mode | Full L=3,056 attention needs GPU memory | **Any windowed result is not comparable to the paper.** The window is printed with every run and stored in each checkpoint |

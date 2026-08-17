@@ -143,6 +143,46 @@ class ConsequenceBalancedSampler(Sampler[list[int]]):
             yield batch[: self.batch_size]
 
 
+def run_fingerprint(**kwargs) -> dict:
+    """The run-defining parameters a resume file must agree with.
+
+    Resuming into a checkpoint trained under different settings would silently
+    produce a model that matches neither configuration, so a mismatch is a
+    hard error rather than a fresh start.
+    """
+    return {k: (v if isinstance(v, (int, float, str, bool)) else str(v))
+            for k, v in sorted(kwargs.items())}
+
+
+def save_resume_state(path: Path, state: dict) -> None:
+    """Atomically write mid-fold training state.
+
+    Written every epoch, so a spot reclamation costs one epoch rather than the
+    fold. The temp-then-replace matters: the instance can die *during* the
+    write, and a truncated resume file would take the fold with it.
+
+    Everything stored is a tensor, a primitive, or a container of those, so
+    the file loads back under `weights_only=True`.
+    """
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    tmp.replace(path)
+
+
+def load_resume_state(path: Path, fingerprint: dict) -> dict | None:
+    if not path.exists():
+        return None
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if state.get("fingerprint") != fingerprint:
+        raise RuntimeError(
+            f"{path} was written under different settings and cannot be resumed.\n"
+            f"  saved: {state.get('fingerprint')}\n"
+            f"  now:   {fingerprint}\n"
+            "Delete the resume files to start over, or re-run with the original flags."
+        )
+    return state
+
+
 def pearson_corr(a: np.ndarray, b: np.ndarray) -> float:
     if len(a) < 2 or np.std(a) == 0 or np.std(b) == 0:
         return float("nan")
@@ -206,12 +246,16 @@ def train_one_fold(
     window_size: int | None,
     seed: int,
     use_coordinates: bool = True,
+    num_workers: int = 0,
+    resume_path: Path | None = None,
+    fingerprint: dict | None = None,
 ) -> dict:
     torch.manual_seed(seed + fold_idx)
 
     # Fitted on this fold's training rows only. Handing it the whole frame
     # first, as the previous version did, leaks validation statistics into
-    # the normalisation constants.
+    # the normalisation constants. Refitting on resume is safe because the fit
+    # is deterministic in the fold's training rows and draws no randomness.
     imputer = ScoreImputer().fit(train_df)
 
     train_ds = build_dataset(train_df, tracks, imputer, window_size=window_size)
@@ -221,8 +265,17 @@ def train_one_fold(
     sampler = ConsequenceBalancedSampler(
         train_df["Variant_consequence"], batch_size, n_batches, seed=seed + fold_idx
     )
-    train_loader = DataLoader(train_ds, batch_sampler=sampler, collate_fn=collate_batch)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_batch)
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": num_workers > 0,
+    }
+    train_loader = DataLoader(
+        train_ds, batch_sampler=sampler, collate_fn=collate_batch, **loader_kwargs
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_batch, **loader_kwargs
+    )
 
     model = DeepATM(n_aux_scores=imputer.n_features, use_coordinates=use_coordinates).to(device)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -234,9 +287,27 @@ def train_one_fold(
     best_preds = None
     best_epoch = -1
     since_improvement = 0
-    lr_history = []
+    lr_history: list[float] = []
+    start_epoch = 0
 
-    for epoch in range(epochs):
+    state = load_resume_state(resume_path, fingerprint) if resume_path else None
+    if state is not None:
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        scaler.load_state_dict(state["scaler"])
+        torch.set_rng_state(state["torch_rng_state"])
+        sampler.rng.bit_generator.state = state["sampler_rng_state"]
+        start_epoch = int(state["next_epoch"])
+        best_val_loss = float(state["best_val_loss"])
+        best_epoch = int(state["best_epoch"])
+        best_state = state["best_model"]
+        best_preds = state["best_preds"].numpy()
+        since_improvement = int(state["since_improvement"])
+        lr_history = [float(x) for x in state["lr_history"]]
+        print(f"[fold {fold_idx}] resuming at epoch {start_epoch} "
+              f"(best val_loss {best_val_loss:.4f} at epoch {best_epoch})")
+
+    for epoch in range(start_epoch, epochs):
         t0 = time.time()
         lr = schedule.apply(optimizer, epoch)
         lr_history.append(lr)
@@ -245,24 +316,48 @@ def train_one_fold(
         val_loss, val_preds, val_targets = run_epoch(model, val_loader, device)
 
         r = pearson_corr(val_preds, val_targets)
+        elapsed = time.time() - t0
+        remaining = (epochs - epoch - 1) * elapsed
         print(
             f"[fold {fold_idx}] epoch {epoch:3d}  lr={lr:.2e}  "
             f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
-            f"val_pearson={r:.3f}  ({time.time() - t0:.1f}s)"
+            f"val_pearson={r:.3f}  ({elapsed:.1f}s, <={remaining / 60:.0f}m left in fold)",
+            flush=True,
         )
 
-        if val_loss < best_val_loss:
+        improved = val_loss < best_val_loss
+        if improved:
             best_val_loss, best_epoch = val_loss, epoch
             best_state = copy.deepcopy(model.state_dict())
             best_preds = val_preds
             since_improvement = 0
         else:
             since_improvement += 1
-            if since_improvement >= patience:
-                print(f"[fold {fold_idx}] early stopping at epoch {epoch}")
-                break
 
-    if best_state is None:  # epochs == 0
+        if resume_path is not None:
+            save_resume_state(resume_path, {
+                "fingerprint": fingerprint,
+                "fold": fold_idx,
+                "next_epoch": epoch + 1,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),
+                "torch_rng_state": torch.get_rng_state(),
+                "sampler_rng_state": sampler.rng.bit_generator.state,
+                "best_val_loss": best_val_loss,
+                "best_epoch": best_epoch,
+                "best_model": best_state,
+                "best_preds": torch.from_numpy(np.asarray(best_preds)),
+                "since_improvement": since_improvement,
+                "lr_history": lr_history,
+                "done": False,
+            })
+
+        if not improved and since_improvement >= patience:
+            print(f"[fold {fold_idx}] early stopping at epoch {epoch}")
+            break
+
+    if best_state is None:  # epochs == 0, or resumed past the end
         raise RuntimeError("no epoch completed; --epochs must be >= 1")
     model.load_state_dict(best_state)
 
@@ -356,7 +451,27 @@ def main() -> None:
         help="Ablation (M6): drop the structural branch.",
     )
     parser.add_argument("--tag", default="", help="Suffix for checkpoint filenames, e.g. 'nocoord'")
+    parser.add_argument(
+        "--num-workers", type=int, default=0,
+        help="DataLoader workers. 0 on CPU; 4-8 on a GPU, where building the "
+             "3,056-residue tracks in Python is otherwise the bottleneck.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Checkpoint every epoch and continue from the last one. Required "
+             "for spot instances, where the run can be reclaimed mid-fold.",
+    )
+    parser.add_argument(
+        "--allow-cpu-full-length", action="store_true",
+        help="Permit --full-length without a GPU. It will take days.",
+    )
     args = parser.parse_args()
+
+    if args.folds < 2:
+        raise SystemExit(
+            f"--folds must be >= 2 (got {args.folds}); with one fold there are no "
+            "remaining rows to train on."
+        )
 
     window_size = None if args.full_length else args.window
     use_coordinates = not args.no_coordinates
@@ -365,9 +480,19 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}  window: {window_size or 'full length (3056)'}  "
           f"coordinates: {use_coordinates}")
+    if device.type == "cuda":
+        print(f"  gpu: {torch.cuda.get_device_name(0)}  "
+              f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB")
     if window_size is not None:
         print("  NOTE: windowed run - results are not directly comparable to the paper (D8).")
+    if window_size is None and device.type != "cuda" and not args.allow_cpu_full_length:
+        raise SystemExit(
+            "--full-length on CPU is ~100x slower than the windowed path and will not "
+            "finish in any useful time. Run it on a CUDA device, or pass "
+            "--allow-cpu-full-length if you really mean to."
+        )
 
+    run_started = time.time()
     df = load_training_frame(args.train_csv, args.max_rows, args.seed)
     print(f"training rows: {len(df):,}")
     print(df["Variant_consequence"].value_counts().to_string())
@@ -390,11 +515,40 @@ def main() -> None:
         train_df = df.iloc[train_idx].reset_index(drop=True)
         val_df = df.iloc[val_idx].reset_index(drop=True)
 
+        fingerprint = run_fingerprint(
+            epochs=args.epochs, folds=args.folds, batch_size=args.batch_size,
+            patience=args.patience, window_size=window_size, seed=args.seed,
+            use_coordinates=use_coordinates, fold=fold_idx,
+            n_train=len(train_df), n_val=len(val_df),
+        )
+        resume_path = CHECKPOINT_DIR / f"resume_fold{fold_idx}{suffix}.pt" if args.resume else None
+
+        # A fold that finished in an earlier attempt is not retrained. Its
+        # out-of-fold predictions come back from the resume file, so the OOF
+        # frame is identical to an uninterrupted run's.
+        done_state = load_resume_state(resume_path, fingerprint) if resume_path else None
+        if done_state is not None and done_state.get("done"):
+            oof_pred[val_idx] = done_state["best_preds"].numpy()
+            oof_fold[val_idx] = fold_idx
+            summary.append({
+                "fold": fold_idx,
+                "val_loss": float(done_state["best_val_loss"]),
+                "best_epoch": int(done_state["best_epoch"]),
+                "n_train": len(train_df),
+                "n_val": len(val_df),
+                "lr_history": [float(x) for x in done_state["lr_history"]],
+                "resumed": "already complete",
+            })
+            print(f"[fold {fold_idx}] already complete "
+                  f"(val_loss={float(done_state['best_val_loss']):.4f}) - skipping")
+            continue
+
         result = train_one_fold(
             train_df, val_df, tracks, device,
             epochs=args.epochs, batch_size=args.batch_size, patience=args.patience,
             fold_idx=fold_idx, window_size=window_size, seed=args.seed,
-            use_coordinates=use_coordinates,
+            use_coordinates=use_coordinates, num_workers=args.num_workers,
+            resume_path=resume_path, fingerprint=fingerprint,
         )
 
         oof_pred[val_idx] = result["val_preds"]
@@ -403,6 +557,11 @@ def main() -> None:
             CHECKPOINT_DIR / f"deepatm_fold{fold_idx}{suffix}.pt",
             result, window_size, use_coordinates,
         )
+        if resume_path is not None:
+            state = torch.load(resume_path, map_location="cpu", weights_only=True)
+            state["done"] = True
+            save_resume_state(resume_path, state)
+
         summary.append({
             "fold": fold_idx,
             "val_loss": result["val_loss"],
@@ -434,6 +593,17 @@ def main() -> None:
             "use_coordinates": use_coordinates,
             "seed": args.seed,
             "n_rows": len(df),
+            # Recorded so a result can be traced back to the run that made it.
+            # `window_size: null` plus `n_rows: 21715` is the only combination
+            # that is comparable to the paper.
+            "epochs": args.epochs,
+            "folds_requested": args.folds,
+            "batch_size": args.batch_size,
+            "patience": args.patience,
+            "device": device.type,
+            "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
+            "torch_version": torch.__version__,
+            "wall_clock_seconds": round(time.time() - run_started, 1),
         }, fh, indent=2)
 
     print(f"\nmean val loss across {args.folds} fold(s): "
