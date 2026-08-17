@@ -18,12 +18,17 @@ plus the values published in the supplementary tables (Table S1–S5). It is a
 numerical results will not exactly reproduce the paper's — see
 [Limitations](#limitations--honest-caveats) below.
 
-> **Status: pre-first-result.** The pipeline runs end to end, but several
-> defects make any current output untrustworthy — evaluation is in-sample, the
-> auROC sign is inverted, feature normalisation leaks across folds, and the
-> structural coordinates are fabricated. All are catalogued with fixes in
-> [`EXECUTION_PLAN.md`](EXECUTION_PLAN.md) §4. Do not cite numbers from this
-> repo until M5 lands.
+> **Status: pipeline complete, awaiting a full-scale run.** Milestones M0–M7 of
+> [`EXECUTION_PLAN.md`](EXECUTION_PLAN.md) have landed: the paper's splits are
+> reproduced exactly, coordinates come from a real cryo-EM structure, feature
+> normalisation is fitted per fold on training rows only, correlations are
+> out-of-fold, and the auROC sign is fixed. Every defect in §4 of that document
+> is closed.
+>
+> What has **not** happened yet is a full-length, full-data training run — the
+> numbers in `outputs/` come from short windowed smoke runs on a CPU and are
+> not comparable to the paper (see [D8](#deviations-from-the-paper)). Treat the
+> code as ready and the results as not yet produced.
 
 ## What DeepATM does
 
@@ -89,15 +94,19 @@ DeepATM-Reconstruction/
 │   ├── raw/                 # place Table S1 (mmc1.xlsx) etc. here — gitignored
 │   └── processed/           # cached feature tensors — gitignored
 ├── src/
-│   ├── data_prep.py         # load & split Table S1 into train/val/held-out
+│   ├── data_prep.py         # Table S1 -> the paper's train/test/predict splits
 │   ├── features.py          # sequence, domain, structure, score featurization
-│   ├── model.py              # DeepATM architecture (PyTorch)
-│   ├── train.py              # 5-fold CV training loop
-│   ├── evaluate.py           # Pearson/Spearman, auROC vs. ClinVar
-│   └── predict.py            # generate eDA scores for unevaluated SNVs
-├── notebooks/                # exploratory analysis
-├── checkpoints/               # trained model weights — gitignored
-├── outputs/                   # predictions / figures — gitignored
+│   ├── dataset.py           # per-variant tensors + shared per-residue tracks
+│   ├── model.py             # DeepATM architecture (PyTorch)
+│   ├── train.py             # 5-fold CV training loop, out-of-fold predictions
+│   ├── evaluate.py          # Pearson/Spearman, auROC vs. ClinVar, baselines
+│   ├── predict.py           # eDA scores for the 4,421 unevaluated SNVs
+│   ├── baseline_rf.py       # random-forest baseline (M6)
+│   └── compare_runs.py      # paired comparison of two runs, e.g. the ablation
+├── tests/                   # pytest; no data files or network required
+├── notebooks/               # exploratory analysis
+├── checkpoints/             # trained model weights — gitignored
+├── outputs/                 # predictions / metrics — gitignored
 ├── requirements.txt
 └── LICENSE
 ```
@@ -116,11 +125,37 @@ the pipeline yourself:
 
 ```bash
 pip install -r requirements.txt
-python -m src.data_prep         # parses Table S1 into train/val/held-out CSVs
-python -m src.train              # 5-fold CV training
-python -m src.evaluate           # correlations + auROC vs. ClinVar
+pytest tests/                    # offline sanity checks; no data files needed
+
+python -m src.data_prep          # Table S1 -> train / test / predict / measured
+python -m src.train --full-length  # 5-fold CV, the paper's setting (needs a GPU)
+python -m src.evaluate           # out-of-fold correlations + auROC vs. ClinVar
 python -m src.predict            # eDA scores for the 4,421 unevaluated SNVs
 ```
+
+A CPU smoke run of the whole pipeline, which finishes in a couple of minutes
+and verifies the plumbing without claiming anything:
+
+```bash
+python -m src.train --epochs 2 --folds 5 --max-rows 800 --window 65
+python -m src.evaluate
+python -m src.predict
+```
+
+The two falsification checks from `EXECUTION_PLAN.md` M6 — a random forest on
+the same scores, and the structural ablation:
+
+```bash
+python -m src.baseline_rf                                    # expect r ~0.55
+python -m src.train --tag full                               # with coordinates
+python -m src.train --no-coordinates --tag nocoord           # without
+python -m src.compare_runs outputs/oof_predictions_full.csv \
+                           outputs/oof_predictions_nocoord.csv \
+                           --label-a coords --label-b nocoord
+```
+
+Both runs of the ablation must use the same `--seed` and `--folds`, or the
+comparison is not paired; `compare_runs` refuses to proceed if they differ.
 
 `Table S1` ("Combined scores (function scores + eDA scores) for all ATM
 SNVs") already flags, per row, whether a variant's score was **experimentally
@@ -135,9 +170,13 @@ reconstruction uses that split directly:
   training).
 
 Only 5 of the paper's 16 auxiliary scores (CADD, BoostDM, EVE, REVEL,
-AlphaMissense) are present in Table S1. `src/features.py` handles missing
-scores by mean/zero-imputation and documents where to plug in the rest (e.g.,
-from dbNSFP v5.1) if you want a closer match to the original feature set.
+AlphaMissense) are present in Table S1. `src/features.py` keeps the column
+order fixed at 16 and pairs every score with a **missingness indicator**, so
+an imputed value is never indistinguishable from a genuinely average one — a
+mean-imputed SIFT score for a synonymous variant is a fabricated number the
+model would otherwise happily fit. The remaining 11 columns come through as
+zero-with-flag until a dbNSFP v5.1 slice is joined in; see
+`EXECUTION_PLAN.md` §2.1 for how.
 
 ### What reproduces exactly
 
@@ -151,14 +190,29 @@ byte-for-byte:
 | ClinVar ≥1★ missense test set | 116 | 116 | ✅ |
 | Training missense | 16,275 | 16,275 | ✅ |
 | Training nonsense | 1,183 | 1,183 | ✅ |
-| Training synonymous | 4,857 | 4,395 | ❌ |
+| Training synonymous | 5,031 | 4,395 | ❌ |
 
 The `ClinVar_classification` column in Table S1 is already ≥1★-filtered, so the
-paper's test set can be rebuilt without downloading ClinVar. The synonymous
-discrepancy is unexplained — see `EXECUTION_PLAN.md` §1.
+paper's test set can be rebuilt without downloading ClinVar — selecting missense
+rows with a P/LP/B/LB classification yields exactly 116 variants at 103 distinct
+amino-acid positions.
+
+Synonymous is the one count that does not reproduce, and the two published
+numbers it has to satisfy are mutually inconsistent. The paper says the
+shared-position exclusion applies to "all evaluated variants", but applying it
+to nonsense gives 1,148 against the paper's 1,183; applying it to missense only
+gives 1,183 exactly. `data_prep.py` therefore defaults to the missense-only
+reading, which matches two of the three published counts and leaves synonymous
+at 5,031 (`--position-exclusion coding` gives the stricter reading: 4,857
+synonymous, 1,148 nonsense). Neither route reaches 4,395; the remaining ~600
+are unexplained by stop-codon exclusion, by deduplication on amino-acid change,
+or by ClinVar status — all three were tested. See `EXECUTION_PLAN.md` §1.
 
 **Targets to reproduce:** 5-fold CV Pearson r ≈ 0.61; eDA ↔ function score
-r = 0.70; auROC 0.95 on the n=116 test set.
+r = 0.70; auROC 0.95 on the n=116 test set. Secondary, and the sharpest checks
+on faithfulness: a random forest on the same scores should reach ≈0.55, and
+removing the coordinate branch should cost measurable accuracy (p = 0.032 in
+the paper).
 
 ## Limitations / honest caveats
 
@@ -171,14 +225,22 @@ educational reimplementation, not a validated clinical tool:
 - AlphaFold 3 coordinates for the full 3,056-residue ATM structure aren't
   published alongside the paper, and **AlphaFold DB has no ATM entry at all**
   (`AF-Q13315-F1` returns 404 — the protein is past the length cut-off). The
-  substitute is a cryo-EM structure: PDB **8OXQ** or **7SID**, both ATM dimers
-  with SIFTS coverage of UniProt 1–3056.
-- ⚠️ **`src/features.py` is currently wrong on both counts.** It requests
-  `8OXO`, which is a 12-residue synthetic peptide rather than ATM, and it falls
-  back to a `synthetic_backbone()` helix — fabricated geometry that is then
-  cached permanently. Any result produced before `EXECUTION_PLAN.md` M2 lands
-  is trained on fake structural data. See §4 of that document for the full
-  defect list.
+  substitute is PDB **7SID**, a 2.53 Å cryo-EM ATM dimer whose SEQRES is
+  exactly the 3,056-residue ATM sequence, so mmCIF `label_seq_id` is the
+  UniProt position with no offset — verified by matching all 2,773 modelled
+  residues against UniProt Q13315 (2,773/2,773 identical). The chain is
+  selected by that identity check, not by chain name, because 7SID also
+  contains nibrin (NBN) and an earlier version of this code let NBN residues
+  into the ATM coordinate track.
+- Residues unmodelled in the cryo-EM map are **masked**, and the coordinate
+  MLP sees an explicit "not resolved" channel. There is deliberately no
+  synthetic-backbone fallback: a fabricated helix teaches the model a geometry
+  that does not exist, and does so silently.
+- The four baselines the paper compares against (AlphaMissense, ESM1b, phyloP,
+  PROVEAN) are also **model inputs**. The comparison in `outputs/metrics.json`
+  therefore measures "does the transformer add anything on top of its own
+  features", not independent superiority. It is reported as the paper does,
+  with that caveat attached.
 - Exact hyperparameter values (embedding init, restart schedule, batch
   composition) are taken verbatim from STAR★Methods, but details not stated
   in the paper (e.g. exact random seeds, PyTorch version) are reconstructed
@@ -187,3 +249,20 @@ educational reimplementation, not a validated clinical tool:
   use the published `Combined_score` / `Classification` columns in the
   paper's own Table S1, or contact the corresponding author
   (hkim1@yuhs.ac) for the original code and model weights.
+
+## Deviations from the paper
+
+Every place this reconstruction is knowingly not the paper. Maintained
+alongside `EXECUTION_PLAN.md` §7.
+
+| # | Deviation | Why | Effect |
+|---|---|---|---|
+| D1 | Training synonymous n=5,031, not 4,395 | The paper's own counts are inconsistent about which consequences the shared-position rule covers | ~14% larger synonymous set; synonymous is 5% of each batch, so the effect on headline metrics is small |
+| D2 | Coordinates from PDB 7SID, not AlphaFold 3 | AF3 model not deposited; AlphaFold DB has no ATM entry (verified 404) | 283 of 3,056 residues unmodelled and masked — the gap problem the paper used AF3 to avoid |
+| D3 | Sinusoidal positional encoding added | Not specified in the paper; `nn.TransformerEncoder` has none, so the encoder otherwise has no ordinal sense of the sequence | Likely improves fit; documents a real ambiguity in the methods |
+| D4 | dbNSFP score versions ≠ the paper's | The paper does not pin a dbNSFP release | Small shifts in the auxiliary features |
+| D5 | ClinVar ≥2★ subset not yet built | Table S1 carries no review-status column, so this one test needs the ClinVar download | The n=68 secondary auROC is not reported |
+| D6 | Random seeds, PyTorch version, embedding init | Not stated | Run-to-run variance; report seed and mean ± sd over ≥3 seeds |
+| D7 | Embeddings combined by summation | The paper says only "integrated with" | Concatenation + projection is an equally valid reading; untested |
+| D8 | Windowed attention in CPU smoke mode | Full L=3,056 attention needs GPU memory | **Any windowed result is not comparable to the paper.** The window is printed with every run and stored in each checkpoint |
+| D9 | 32 model inputs (16 scores + 16 missingness flags), not 16 | 11 of the 16 scores are absent entirely and 23–39% of the rest are undefined for synonymous variants | Prevents the model reading an imputed value as a real one; `ScoreImputer(with_flags=False)` restores the literal 16 |

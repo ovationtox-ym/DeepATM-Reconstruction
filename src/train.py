@@ -417,8 +417,11 @@ def main() -> None:
     # Out-of-fold predictions: every row scored by the one fold that did not
     # train on it. evaluate.py and predict.py both read this rather than
     # re-predicting in-sample.
-    oof = df[["Protein_change", "position", "ref_aa", "alt_aa",
-              "Variant_consequence", "function_score"]].copy()
+    # hg38_pos/Ref/Alt identify the SNV uniquely; Protein_change does not —
+    # several synonymous SNVs share one protein change, which would fan out
+    # any join keyed on it (see src.compare_runs).
+    oof = df[["hg38_pos", "Ref", "Alt", "Protein_change", "position", "ref_aa",
+              "alt_aa", "Variant_consequence", "function_score"]].copy()
     oof["fold"] = oof_fold
     oof["oof_prediction"] = oof_pred
     oof_path = OUTPUT_DIR / f"oof_predictions{suffix}.csv"
