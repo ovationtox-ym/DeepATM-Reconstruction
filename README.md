@@ -18,6 +18,13 @@ plus the values published in the supplementary tables (Table S1–S5). It is a
 numerical results will not exactly reproduce the paper's — see
 [Limitations](#limitations--honest-caveats) below.
 
+> **Status: pre-first-result.** The pipeline runs end to end, but several
+> defects make any current output untrustworthy — evaluation is in-sample, the
+> auROC sign is inverted, feature normalisation leaks across folds, and the
+> structural coordinates are fabricated. All are catalogued with fixes in
+> [`EXECUTION_PLAN.md`](EXECUTION_PLAN.md) §4. Do not cite numbers from this
+> repo until M5 lands.
+
 ## What DeepATM does
 
 The paper experimentally measured the effect on cell fitness (a "function
@@ -130,7 +137,28 @@ reconstruction uses that split directly:
 Only 5 of the paper's 16 auxiliary scores (CADD, BoostDM, EVE, REVEL,
 AlphaMissense) are present in Table S1. `src/features.py` handles missing
 scores by mean/zero-imputation and documents where to plug in the rest (e.g.,
-from dbNSFP v4.8) if you want a closer match to the original feature set.
+from dbNSFP v5.1) if you want a closer match to the original feature set.
+
+### What reproduces exactly
+
+Checked against `mmc1.xlsx` — four of the paper's five dataset counts come out
+byte-for-byte:
+
+| Quantity | Table S1 | Paper | |
+|---|---|---|---|
+| Measured coding SNVs | 23,092 | 23,092 | ✅ |
+| DeepATM-predicted SNVs | 4,421 | 4,421 | ✅ |
+| ClinVar ≥1★ missense test set | 116 | 116 | ✅ |
+| Training missense | 16,275 | 16,275 | ✅ |
+| Training nonsense | 1,183 | 1,183 | ✅ |
+| Training synonymous | 4,857 | 4,395 | ❌ |
+
+The `ClinVar_classification` column in Table S1 is already ≥1★-filtered, so the
+paper's test set can be rebuilt without downloading ClinVar. The synonymous
+discrepancy is unexplained — see `EXECUTION_PLAN.md` §1.
+
+**Targets to reproduce:** 5-fold CV Pearson r ≈ 0.61; eDA ↔ function score
+r = 0.70; auROC 0.95 on the n=116 test set.
 
 ## Limitations / honest caveats
 
@@ -141,10 +169,16 @@ educational reimplementation, not a validated clinical tool:
 - Only 5/16 auxiliary pathogenicity scores are available from the public
   supplement; the rest need a separate download (dbNSFP) not included here.
 - AlphaFold 3 coordinates for the full 3,056-residue ATM structure aren't
-  published alongside the paper; `src/features.py` fetches Cα coordinates
-  from the cryo-EM structures cited in the paper (PDB 8OXO / 7SID) as a
-  substitute, with a synthetic fallback if the fetch fails or residues are
-  missing from the deposited structure.
+  published alongside the paper, and **AlphaFold DB has no ATM entry at all**
+  (`AF-Q13315-F1` returns 404 — the protein is past the length cut-off). The
+  substitute is a cryo-EM structure: PDB **8OXQ** or **7SID**, both ATM dimers
+  with SIFTS coverage of UniProt 1–3056.
+- ⚠️ **`src/features.py` is currently wrong on both counts.** It requests
+  `8OXO`, which is a 12-residue synthetic peptide rather than ATM, and it falls
+  back to a `synthetic_backbone()` helix — fabricated geometry that is then
+  cached permanently. Any result produced before `EXECUTION_PLAN.md` M2 lands
+  is trained on fake structural data. See §4 of that document for the full
+  defect list.
 - Exact hyperparameter values (embedding init, restart schedule, batch
   composition) are taken verbatim from STAR★Methods, but details not stated
   in the paper (e.g. exact random seeds, PyTorch version) are reconstructed

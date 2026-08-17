@@ -1,26 +1,37 @@
 """
 Load Table S1 (mmc1.xlsx) — "Combined scores (function scores + eDA scores)
-for all ATM SNVs" — and split it into the sets DeepATM's own paper describes:
+for all ATM SNVs" — and reproduce the exact splits described in STAR★Methods
+§"Deep learning dataset and feature engineering".
 
-  * measured  : DeepATM_predicted == "No"  -> experimentally derived function
-                score (from the prime-editing / olaparib screen). This is
-                the label DeepATM was trained to regress.
-  * predicted : DeepATM_predicted == "Yes" -> the paper's own DeepATM output
-                (eDA score) for the 4,421 SNVs that couldn't be edited.
-                We keep this aside as a reference set: this reconstruction's
-                predictions can be compared against it, but it is never used
-                for training.
-  * unusable  : DeepATM_predicted == "NA"  -> rows with no protein change
-                (e.g. intronic/splice variants that don't map to a single
-                residue) or otherwise out of scope for this residue-level
-                regression model. Kept for completeness but unused here.
+The paper's rule, verbatim:
 
-Row-level parsing follows the STAR★Methods "Deep learning dataset and
-feature engineering" section: the training set excludes stop-codon rows,
-and (in the original paper) any variant sharing an amino-acid position with
-the ClinVar-derived test set. We reproduce the ClinVar-based held-out split
-in `features.py`/`train.py`; this module only does the raw load + basic
-train/val/predict partition.
+    "The test dataset comprised all missense variants classified as
+     pathogenic, likely pathogenic, benign, or likely benign with a one-star
+     rating or higher in ClinVar (n = 116), irrespective of whether they had
+     been experimentally evaluated. The training dataset was constructed by
+     excluding all evaluated variants that shared amino acid positions with
+     the test set. The remainder of the training data consists of evaluated
+     missense (n = 16,275), synonymous (n = 4,395) and nonsense variants
+     (n = 1,183). Mutations at stop codon positions were excluded."
+
+Table S1's `ClinVar_classification` column is *already* filtered to >=1-star,
+so the test set is reconstructible from the supplement alone: selecting
+missense rows with a P/LP/B/LB classification yields exactly 116 variants at
+103 distinct amino-acid positions, and excluding those positions leaves
+exactly 16,275 missense and 1,183 nonsense — both matching the paper.
+Synonymous comes out at 4,857 against the paper's 4,395; the extra 462 are
+unexplained (see EXECUTION_PLAN.md §1). That ~2% difference is documented,
+not silently absorbed.
+
+Outputs (data/processed/):
+    train.csv    — measured coding variants, test positions and stop-codon
+                   positions excluded. Labels are real function scores.
+    test.csv     — the 116 ClinVar missense variants. Evaluation only.
+    predict.csv  — the 4,421 rows the paper's own DeepATM predicted. Never
+                   used for training; `published_eda_score` is retained so
+                   this reconstruction can be scored against the original.
+    measured.csv — all 23,092 measured coding rows, pre-exclusion. Used for
+                   rank calibration in predict.py.
 
 Usage:
     python -m src.data_prep
@@ -36,6 +47,29 @@ import pandas as pd
 RAW_PATH = Path("data/raw/mmc1.xlsx")
 OUT_DIR = Path("data/processed")
 
+N_RESIDUES = 3056  # full-length ATM; position 3057 is the stop codon
+
+CODING_CONSEQUENCES = ["Missense", "Synonymous", "Nonsense"]
+
+# ClinVar classifications that define the paper's test set. Matched exactly —
+# note that "Conflicting classifications of pathogenicity" is deliberately
+# absent, and that a substring test for "pathogenic" would wrongly capture it.
+CLINVAR_PATHOGENIC = {
+    "Pathogenic",
+    "Likely pathogenic",
+    "Pathogenic/Likely pathogenic",
+}
+CLINVAR_BENIGN = {
+    "Benign",
+    "Likely benign",
+    "Benign/Likely benign",
+}
+
+# The 5 of the paper's 16 auxiliary scores that ship in Table S1.
+SUPPLEMENT_SCORE_COLS = [
+    "CADD.phred", "boostDM_score", "EVE_scores_ASM", "REVEL", "AlphaMissense",
+]
+
 AA_3TO1 = {
     "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C", "Gln": "Q",
     "Glu": "E", "Gly": "G", "His": "H", "Ile": "I", "Leu": "L", "Lys": "K",
@@ -43,8 +77,8 @@ AA_3TO1 = {
     "Tyr": "Y", "Val": "V", "Ter": "*",
 }
 
-# Matches protein HGVS-ish "p.Met1Lys" or short "M1K" forms found in the
-# supplement's `Protein_change` column.
+# Table S1 uses the short form ("M1V", "C11*"); the long HGVS form is
+# accepted too so the parser survives a differently-formatted supplement.
 _PROT_RE_LONG = re.compile(r"p\.([A-Za-z]{3})(\d+)([A-Za-z]{3}|\*)")
 _PROT_RE_SHORT = re.compile(r"^([A-Za-z*])(\d+)([A-Za-z*])$")
 
@@ -73,58 +107,174 @@ def load_table_s1(path: Path = RAW_PATH) -> pd.DataFrame:
 
 
 def build_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    ref_aa, pos, alt_aa = zip(*df["Protein_change"].map(parse_protein_change))
+    """Parse protein changes and normalise the numeric columns.
+
+    Critically, this splits Table S1's `Combined_score` into two disjoint
+    columns by provenance. The same column holds an experimentally measured
+    function score when `DeepATM_predicted == "No"` and the paper's *own
+    DeepATM output* when it is "Yes". Training on the latter would be
+    self-supervision on the model being reconstructed, so the two are given
+    different names and never merged.
+    """
     df = df.copy()
+    ref_aa, pos, alt_aa = zip(*df["Protein_change"].map(parse_protein_change))
     df["ref_aa"] = ref_aa
-    df["position"] = pos
+    df["position"] = pd.array(pos, dtype="Int64")
     df["alt_aa"] = alt_aa
 
-    # numeric feature columns present in the supplement (5 of the paper's 16)
-    for col in ["CADD.phred", "boostDM_score", "EVE_scores_ASM", "REVEL", "AlphaMissense"]:
+    for col in SUPPLEMENT_SCORE_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["GnomAD_all_AF"] = pd.to_numeric(df["GnomAD_all_AF"], errors="coerce").fillna(0.0)
 
+    combined = pd.to_numeric(df["Combined_score"], errors="coerce")
+    is_predicted = df["DeepATM_predicted"] == "Yes"
+    is_measured = df["DeepATM_predicted"] == "No"
+    df["function_score"] = combined.where(is_measured)
+    df["published_eda_score"] = combined.where(is_predicted)
+
     return df
 
 
-def split_dataset(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    measured = df[df["DeepATM_predicted"] == "No"].reset_index(drop=True)
-    predicted = df[df["DeepATM_predicted"] == "Yes"].reset_index(drop=True)
-    unusable = df[~df["DeepATM_predicted"].isin(["No", "Yes"])].reset_index(drop=True)
+def clinvar_label(df: pd.DataFrame) -> pd.Series:
+    """Map ClinVar_classification onto 1 (P/LP), 0 (B/LB), or NA."""
+    cls = df["ClinVar_classification"]
+    label = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    label[cls.isin(CLINVAR_PATHOGENIC)] = 1
+    label[cls.isin(CLINVAR_BENIGN)] = 0
+    return label
 
-    # DeepATM (per STAR Methods) is trained/evaluated on missense, synonymous,
-    # and nonsense variants only (stop-codon positions in the *target* are
-    # excluded, but nonsense inputs used at low frequency for calibration).
-    measured = measured[measured["Variant_consequence"].isin(["Missense", "Synonymous", "Nonsense"])]
 
-    # STAR Methods: "Mutations at stop codon positions were excluded."
-    # A handful of rows in the supplement encode readthrough-past-the-stop
-    # variants at position 3057 (one past the 3,056-residue protein); those
-    # fall outside the reference sequence entirely and are dropped here too.
-    from .features import N_RESIDUES
-    measured = measured[measured["position"] <= N_RESIDUES]
-    predicted = predicted[predicted["position"] <= N_RESIDUES]
+def split_dataset(df: pd.DataFrame, position_exclusion: str = "missense") -> dict[str, pd.DataFrame]:
+    """Reproduce the paper's test / train / predict partition.
 
-    return {"measured": measured, "predicted": predicted, "unusable": unusable}
+    `position_exclusion` controls which consequences the "shared amino acid
+    position" rule is applied to. The paper says "all evaluated variants",
+    but its own counts contradict that:
+
+        applied to all coding : missense 16,275 OK, nonsense 1,148 (paper 1,183)
+        applied to missense   : missense 16,275 OK, nonsense 1,183 OK
+
+    Nonsense reproduces exactly only when the rule is *not* applied to it —
+    1,192 measured nonsense minus the 9 at the stop codon. So "missense" is
+    the reading that matches the published numbers, and is the default.
+
+    "coding" applies the rule to all three consequences. It is the stricter,
+    lower-leakage choice — a synonymous variant at a test position still
+    trains that position's embedding against a label — at the cost of no
+    longer matching the paper. Use it for any claim about generalisation;
+    use the default for reproduction.
+    """
+    if position_exclusion not in ("missense", "coding"):
+        raise ValueError(f"position_exclusion must be 'missense' or 'coding', got {position_exclusion!r}")
+    df = df.copy()
+    df["clinvar_label"] = clinvar_label(df)
+
+    is_coding = df["Variant_consequence"].isin(CODING_CONSEQUENCES)
+    is_measured = df["DeepATM_predicted"] == "No"
+
+    # Test set: ALL missense P/LP/B/LB, "irrespective of whether they had been
+    # experimentally evaluated" — so this deliberately spans both the measured
+    # and the DeepATM-predicted rows.
+    test = df[
+        (df["Variant_consequence"] == "Missense") & df["clinvar_label"].notna()
+    ].reset_index(drop=True)
+
+    measured = df[is_measured & is_coding].reset_index(drop=True)
+
+    # "Mutations at stop codon positions were excluded." Position 3057 is one
+    # past the 3,056-residue protein — the terminator itself.
+    at_stop_codon = measured["position"] > N_RESIDUES
+
+    # "excluding all evaluated variants that shared amino acid positions with
+    # the test set"
+    test_positions = set(test["position"].dropna().astype(int))
+    shares_test_position = measured["position"].isin(test_positions)
+    if position_exclusion == "missense":
+        shares_test_position &= measured["Variant_consequence"] == "Missense"
+
+    train = measured[~at_stop_codon & ~shares_test_position].reset_index(drop=True)
+
+    predict = df[
+        (df["DeepATM_predicted"] == "Yes") & is_coding & (df["position"] <= N_RESIDUES)
+    ].reset_index(drop=True)
+
+    return {
+        "train": train,
+        "test": test,
+        "predict": predict,
+        "measured": measured,
+    }
+
+
+# Counts the paper reports, for the provenance check printed by main().
+PAPER_COUNTS = {
+    ("measured", None): 23092,
+    ("test", None): 116,
+    ("train", "Missense"): 16275,
+    ("train", "Synonymous"): 4395,
+    ("train", "Nonsense"): 1183,
+    ("predict", None): 4421,
+}
+
+
+def report(splits: dict[str, pd.DataFrame]) -> None:
+    """Print each split against the paper's number, flagging any mismatch."""
+    def line(label: str, n: int, expected: int | None) -> None:
+        if expected is None:
+            print(f"  {label:<34}{n:>7}")
+        else:
+            mark = "OK " if n == expected else "!! "
+            print(f"  {mark}{label:<32}{n:>7}   paper {expected:>6,}")
+
+    for name in ("measured", "test", "train", "predict"):
+        part = splits[name]
+        line(name, len(part), PAPER_COUNTS.get((name, None)))
+        if name == "train":
+            for cons in CODING_CONSEQUENCES:
+                n = int((part["Variant_consequence"] == cons).sum())
+                line(f"  {cons.lower()}", n, PAPER_COUNTS.get((name, cons)))
+
+    test = splits["test"]
+    print(
+        f"\n  test set: {int((test['clinvar_label'] == 1).sum())} P/LP, "
+        f"{int((test['clinvar_label'] == 0).sum())} B/LB, "
+        f"at {test['position'].nunique()} distinct positions"
+    )
+    n_scored = int(test["function_score"].notna().sum())
+    print(f"  of which {n_scored} were experimentally measured, {len(test) - n_scored} were not")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path, default=RAW_PATH)
     parser.add_argument("--out", type=Path, default=OUT_DIR)
+    parser.add_argument(
+        "--position-exclusion", choices=["missense", "coding"], default="missense",
+        help="Which consequences the shared-position exclusion applies to. "
+             "'missense' reproduces the paper; 'coding' is stricter. See split_dataset().",
+    )
     args = parser.parse_args()
+
+    if not args.raw.exists():
+        raise FileNotFoundError(
+            f"{args.raw} not found. Download the paper's Supplemental Information "
+            f"(https://doi.org/10.1016/j.cell.2025.05.046) and place mmc1.xlsx there."
+        )
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    df = load_table_s1(args.raw)
-    df = build_dataset(df)
-    splits = split_dataset(df)
+    df = build_dataset(load_table_s1(args.raw))
+    splits = split_dataset(df, position_exclusion=args.position_exclusion)
+
+    print(f"Split sizes vs. the paper (position exclusion: {args.position_exclusion}):")
+    report(splits)
+    print()
 
     for name, part in splits.items():
         out_path = args.out / f"{name}.csv"
         part.to_csv(out_path, index=False)
-        print(f"{name:>10}: {len(part):6d} rows -> {out_path}")
+        print(f"  wrote {len(part):6d} rows -> {out_path}")
 
 
 if __name__ == "__main__":
