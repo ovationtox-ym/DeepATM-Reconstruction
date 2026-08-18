@@ -120,8 +120,16 @@ step 3 instead of being ignored. If you ever run the smoke pass by hand rather
 than through the cell, clear them yourself:
 
 ```bash
-rm -f checkpoints/resume_fold*.pt checkpoints/deepatm_fold*.pt
+rm -f checkpoints/resume_fold*.pt checkpoints/deepatm_fold*.pt \
+      deepatm-results-*.tar.gz outputs/*.json outputs/*.csv outputs/logs/*.log
 ```
+
+The checkpoints are the part that breaks the run; the rest is about being able
+to read the result afterwards. `run_full.sh` appends to `train.log` with
+`tee -a`, so the real run's log would otherwise open with the smoke run's, and
+two `deepatm-results-*.tar.gz` on the Output tab — one of them windowed junk —
+are not distinguishable later. `data/processed/` is deliberately left alone:
+the splits are deterministic from Table S1 and the full run rebuilds them.
 
 ## 5. Run it
 
