@@ -2,7 +2,7 @@
 #
 # The full-scale reproduction, start to finish, unattended.
 #
-# This is the run whose numbers are comparable to the paper: all 21,715
+# This is the run whose numbers are comparable to the paper: all 22,489
 # training rows, the full 3,056-residue sequence (no window), 150 epochs with
 # early stopping, 5 folds. Every earlier result in outputs/ came from a
 # windowed CPU smoke run and is not comparable (D8).

@@ -37,7 +37,7 @@ and use that same region throughout. `us-east-1` has the widest capacity.
 
 The model is small — `embed_dim=64`, 2 encoder layers. Essentially all the cost
 is the L=3,056 attention: ~5 GFLOP per sample forward, so the 150-epoch ceiling
-across 5 folds × 21,715 rows is ~2.6e17 FLOPs. Early stopping (patience 20)
+across 5 folds × 22,489 rows is ~2.7e17 FLOPs. Early stopping (patience 20)
 will realistically cut that by half or more.
 
 | Instance | GPU | On-demand | Est. run | Est. cost |
@@ -173,7 +173,7 @@ the cheapest insurance against an instance left running over a weekend.
 ## 7. What to check in the results
 
 The run is only comparable to the paper if `outputs/train_summary.json` shows
-`"window_size": null` and `"n_rows": 21715`. Then:
+`"window_size": null` and `"n_rows": 22489`. Then:
 
 | Quantity | Paper | Where |
 |---|---|---|

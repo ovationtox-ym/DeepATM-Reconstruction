@@ -19,9 +19,11 @@ so the test set is reconstructible from the supplement alone: selecting
 missense rows with a P/LP/B/LB classification yields exactly 116 variants at
 103 distinct amino-acid positions, and excluding those positions leaves
 exactly 16,275 missense and 1,183 nonsense — both matching the paper.
-Synonymous comes out at 4,857 against the paper's 4,395; the extra 462 are
-unexplained (see EXECUTION_PLAN.md §1). That ~2% difference is documented,
-not silently absorbed.
+Synonymous comes out at 5,031 against the paper's 4,395 under the default
+missense-only exclusion (see `split_dataset`), so all 636 of the difference is
+unexplained; `--position-exclusion coding` removes 174 of them and reaches
+4,857, at the cost of nonsense no longer matching. That ~14% difference is
+documented, not silently absorbed (EXECUTION_PLAN.md §1, deviation D1).
 
 Outputs (data/processed/):
     train.csv    — measured coding variants, test positions and stop-codon

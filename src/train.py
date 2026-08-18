@@ -594,8 +594,10 @@ def main() -> None:
             "seed": args.seed,
             "n_rows": len(df),
             # Recorded so a result can be traced back to the run that made it.
-            # `window_size: null` plus `n_rows: 21715` is the only combination
-            # that is comparable to the paper.
+            # `window_size: null` plus `n_rows: 22489` is the only combination
+            # that is comparable to the paper (22,489 = 16,275 missense +
+            # 5,031 synonymous + 1,183 nonsense, the default missense-only
+            # position exclusion; see data_prep.split_dataset).
             "epochs": args.epochs,
             "folds_requested": args.folds,
             "batch_size": args.batch_size,

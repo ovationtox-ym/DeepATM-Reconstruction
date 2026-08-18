@@ -58,7 +58,8 @@ Every count below was computed directly from the file, not assumed:
 | ClinVar test set: missense P/LP/B/LB | **116** | 116 | ✅ |
 | Training missense (after position exclusion) | **16,275** | 16,275 | ✅ |
 | Training nonsense (after dropping stop-codon position) | **1,183** | 1,183 | ✅ |
-| Training synonymous | 4,857 | 4,395 | ❌ Δ=462 |
+| Training synonymous | 5,031 | 4,395 | ❌ Δ=636 |
+| Training total | **22,489** | 21,853 | ❌ Δ=636, all of it synonymous |
 
 Two consequences of this that change the build:
 
@@ -71,12 +72,27 @@ from the measured set leaves exactly 16,275 missense. The paper's split is
 byte-for-byte reconstructible. The ≥2★ subset (n=68) is *not* — Table S1 carries
 no review-status column — so that one test still requires `variant_summary.txt.gz`.
 
-**The synonymous count is the one open discrepancy.** Position-sharing exclusion
-removes only 174 synonymous variants (5,031 → 4,857); the paper reports 4,395.
-The extra 462 are not explained by stop-codon exclusion, by deduplication on
-amino-acid change, or by ClinVar status — all three were tested and none produce
-4,395. Treat this as a known, documented ~2% training-set difference, not as a
-bug to chase. It is too small to move the headline metrics.
+**The synonymous count is the one open discrepancy**, and which number it takes
+depends on a genuine ambiguity in the paper's own text. The paper says the
+training set excludes "all evaluated variants that shared amino acid positions
+with the test set", but its published counts contradict that reading:
+
+| Exclusion applied to | missense | nonsense | synonymous |
+|---|---|---|---|
+| all coding variants | 16,275 ✅ | 1,148 ❌ (paper 1,183) | 4,857 |
+| **missense only** (default) | **16,275 ✅** | **1,183 ✅** | **5,031** |
+
+Nonsense reproduces exactly only when the rule is *not* applied to it, so
+missense-only is the reading consistent with the paper's own numbers, and it is
+`data_prep.py`'s default. It leaves synonymous at 5,031 against the paper's
+4,395 — the full 636 unexplained. Neither stop-codon exclusion, deduplication
+on amino-acid change, nor ClinVar status produces 4,395; all three were tested.
+
+`--position-exclusion coding` takes the stricter, lower-leakage reading (a
+synonymous variant at a test position still trains that position's embedding
+against a label) at the cost of nonsense no longer matching. Use it for claims
+about generalisation, the default for reproduction. Either way this is a known,
+documented difference, not a bug to chase.
 
 **On redistribution.** The supplement is Elsevier/Cell Press copyright. Using a
 local copy for a study reconstruction is ordinary; committing it to a public
@@ -205,7 +221,7 @@ Rename the target column on load: Table S1's `Combined_score` is the **function
 score** for measured rows and the paper's **own eDA output** for predicted rows.
 Training on the wrong subset would be self-supervision on the model being
 reconstructed. Make that impossible to do by accident.
-✅ Row counts print as 116 / 21,715 (16,275 + 4,857 + 1,183, our synonymous
+✅ Row counts print as 116 / 22,489 (16,275 + 5,031 + 1,183, our synonymous
 count) / 4,421, and the missense and nonsense figures match the paper exactly.
 
 ### M2 — Features
@@ -406,7 +422,7 @@ where this reconstruction is knowingly not the paper.
 
 | # | Deviation | Why | Effect |
 |---|---|---|---|
-| D1 | Training synonymous n=4,857, not 4,395 | The paper's exclusion rule accounts for only 174 of the 636 missing synonymous variants; the rest is unexplained (§1) | ~2% larger training set; negligible for headline metrics |
+| D1 | Training synonymous n=5,031, not 4,395 | Under the exclusion reading that reproduces the paper's missense *and* nonsense counts, none of the 636 missing synonymous variants is accounted for (§1) | ~3% larger training set (22,489 vs 21,853). Synonymous are 5% of each resampled batch, so the effect on headline metrics is small |
 | D2 | Coordinates from PDB 8OXQ/7SID, not AlphaFold 3 | AF3 model not deposited; AlphaFold DB has no ATM entry (verified 404) | Unmodelled loops must be masked — exactly the gap problem the paper used AF3 to avoid |
 | D3 | Positional encoding added | Not specified in the paper; the encoder otherwise has no ordinal position sense | Likely improves fit; documents a real ambiguity in the methods |
 | D4 | dbNSFP v5.1 score versions ≠ the paper's | The paper does not pin a dbNSFP release | Small shifts in the auxiliary features |

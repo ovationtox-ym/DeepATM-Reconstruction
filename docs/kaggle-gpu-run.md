@@ -182,7 +182,7 @@ storage that keeps billing.
 ## 8. What to check in the results
 
 The run is only comparable to the paper if `outputs/train_summary.json` shows
-`"window_size": null` and `"n_rows": 21715`. Then:
+`"window_size": null` and `"n_rows": 22489`. Then:
 
 | Quantity | Paper | Where |
 |---|---|---|
