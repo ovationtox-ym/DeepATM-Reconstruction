@@ -104,15 +104,24 @@ found. Set it explicitly only to override that.
    `/kaggle/working/` so the commit picks them up, then prints the headline
    table.
 
-Before the real thing, the notebook has an optional smoke cell:
+Before the real thing, the notebook has an optional smoke cell — set
+`RUN_SMOKE = True`, run it, set it back to `False`. About ten minutes, it
+exercises every step of the pipeline, and its results are *not* comparable to
+the paper. Worth running once to confirm the dataset path and internet access
+before spending a 12-hour commit on it.
 
-```python
-!EPOCHS=2 SMOKE=1 WORKERS=2 ./scripts/run_full.sh
+**The smoke run deletes its own checkpoints when it finishes, and that cleanup
+is not optional.** `train.py` fingerprints every resume file with the epoch
+count, window size and split sizes, and refuses to resume across a mismatch —
+a hard error rather than a silent fresh start, since resuming into a checkpoint
+trained under other settings would yield a model matching neither
+configuration. A surviving smoke resume file therefore *aborts* the full run at
+step 3 instead of being ignored. If you ever run the smoke pass by hand rather
+than through the cell, clear them yourself:
+
+```bash
+rm -f checkpoints/resume_fold*.pt checkpoints/deepatm_fold*.pt
 ```
-
-About ten minutes, exercises every step of the pipeline, and its results are
-*not* comparable to the paper. Worth running interactively once to confirm the
-dataset path and internet access before spending a 12-hour commit on it.
 
 ## 5. Run it
 
@@ -191,6 +200,7 @@ learned.
 | Session dies around 20 min with no error | Interactive idle timeout | Use Save & Run All (Commit), not Run All |
 | `outputs/` empty after the session | Version was never committed | Same as above |
 | Run is slow and `nvidia-smi` shows low GPU use | DataLoader oversubscribing 4 vCPUs | Keep `WORKERS=2`; do not raise it |
+| Step 3 aborts with "written under different settings and cannot be resumed" | Smoke-run resume files survived into the full run | `rm -f checkpoints/resume_fold*.pt checkpoints/deepatm_fold*.pt`, then re-run. The smoke cell does this automatically |
 | `pygam` install fails on the resolver | pygam pins older scipy in some images | `pip install --no-deps pygam` — it only needs numpy/scipy at runtime, both present |
 
 ---
