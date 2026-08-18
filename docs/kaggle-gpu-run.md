@@ -72,13 +72,17 @@ Top cell of the notebook:
 
 ```python
 REPO_URL   = "https://github.com/ovationtox-ym/DeepATM-Reconstruction.git"
-MMC1_INPUT = "/kaggle/input/deepatm-mmc1/mmc1.xlsx"   # your dataset path
-RESUME_FROM = None                                     # see §6
+MMC1_INPUT = None    # auto-discovered under /kaggle/input; see below
+RESUME_FROM = None   # see §6
 ```
 
-`MMC1_INPUT` is the one people get wrong. Kaggle lowercases and slugifies
-dataset titles, and nests by original folder if you uploaded a folder. Run the
-notebook's `ls /kaggle/input` cell and copy the real path rather than assuming.
+`MMC1_INPUT` is the one people get wrong, which is why the default is now to
+not write it down. Kaggle lowercases and slugifies dataset titles, and the
+mount layout varies — a dataset lands at either `/kaggle/input/<slug>/` or
+`/kaggle/input/datasets/<user>/<slug>/`, and the slug of a dataset titled
+`mmc1.xlsx` is the *directory* `mmc1-xlsx`. Left as `None`, the notebook globs
+`/kaggle/input/**/mmc1*.xls*`, requires exactly one match, and prints what it
+found. Set it explicitly only to override that.
 
 ## 4. What the notebook does
 
@@ -182,7 +186,8 @@ learned.
 |---|---|---|
 | `torch.cuda.is_available()` is False | Accelerator set to None | Sidebar → Accelerator → GPU T4 x2, then restart the session |
 | `pip` or the ClinVar download hangs, then fails | Internet toggle off | Sidebar → Internet → On (needs phone verification) |
-| `FileNotFoundError` on `mmc1.xlsx` | Dataset path guessed, not read | Run the `ls /kaggle/input` cell and paste the real path |
+| `FileNotFoundError` on `mmc1.xlsx` | Dataset not attached, or `MMC1_INPUT` overridden with a guessed path | Leave `MMC1_INPUT = None` and let §4 discover it; check the dataset is attached under Add Input |
+| Cell 2 sits for many minutes with no output | Session queuing for a free GPU — no cell is executing yet | Nothing to fix; watch the session status indicator. Switching to P100 often gets a slot sooner |
 | Session dies around 20 min with no error | Interactive idle timeout | Use Save & Run All (Commit), not Run All |
 | `outputs/` empty after the session | Version was never committed | Same as above |
 | Run is slow and `nvidia-smi` shows low GPU use | DataLoader oversubscribing 4 vCPUs | Keep `WORKERS=2`; do not raise it |
