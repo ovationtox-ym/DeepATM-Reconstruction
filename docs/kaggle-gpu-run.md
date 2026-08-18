@@ -56,7 +56,7 @@ In the right-hand sidebar:
 |---|---|
 | Accelerator | **GPU T4 x2** |
 | Internet | **On** |
-| Persistence | Files only (or off; the commit saves output either way) |
+| Persistence | **Files only** — see §6; it is what makes a resume possible if the run is cut off |
 
 **On the accelerator choice.** The code is single-GPU — only `cuda:0` is used,
 and the second T4 idles. Pick T4 anyway: training runs under AMP, and the T4's
@@ -145,14 +145,23 @@ takes `/kaggle/working` with it.
 
 ## 6. If it doesn't finish in 12 hours
 
-The version is saved with whatever `/kaggle/working` held when the cap hit —
-which includes `checkpoints/`, because the notebook copies them out after each
-`run_full.sh` step. To continue:
+**Turn Persistence on before you need it.** `train.py` checkpoints every epoch
+into `/kaggle/working/DeepATM-Reconstruction/checkpoints/`, so the state to
+resume from exists on disk from the first epoch onwards. What is *not* certain
+is whether a version killed at the cap persists its output files: a timed-out
+commit is marked failed, and failed runs may not save output. With sidebar →
+**Persistence** set to "Files only" (or "Variables and Files"), `/kaggle/working`
+survives between sessions regardless of how the version ended, which removes
+the question entirely. Set it before the run, not after — changing notebook
+settings restarts the session.
 
-1. In the notebook editor: **Add Input** → **Notebook Output** → select your
-   own previous version.
-2. Set `RESUME_FROM = "/kaggle/input/<notebook-slug>/checkpoints"` in the first
-   cell.
+To continue, whichever way the files survived:
+
+1. If Persistence kept `/kaggle/working`, the checkpoints are already in place;
+   leave `RESUME_FROM = None` and commit again.
+2. Otherwise, in the notebook editor: **Add Input** → **Notebook Output** →
+   select your own previous version, and set
+   `RESUME_FROM = "/kaggle/input/<notebook-slug>/checkpoints"` in the first cell.
 3. Commit again.
 
 Completed folds are skipped and the in-progress fold restarts from its last
