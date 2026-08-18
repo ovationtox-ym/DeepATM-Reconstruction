@@ -34,8 +34,11 @@ numerical results will not exactly reproduce the paper's — see
 > numbers in `outputs/` come from short windowed smoke runs on a CPU and are
 > not comparable to the paper (see [D8](#deviations-from-the-paper)). Treat the
 > code as ready and the results as not yet produced. The run itself is a single
-> unattended command on a rented GPU, ~$3–6 and a few hours:
-> [`docs/aws-gpu-run.md`](docs/aws-gpu-run.md), then `./scripts/run_full.sh`.
+> unattended command on any GPU, a few hours:
+> [`docs/kaggle-gpu-run.md`](docs/kaggle-gpu-run.md) does it free on Kaggle
+> (notebook: [`notebooks/kaggle_deepatm.ipynb`](notebooks/kaggle_deepatm.ipynb)),
+> and [`docs/aws-gpu-run.md`](docs/aws-gpu-run.md) does it on a rented AWS
+> instance for ~$3–6. Either way the command is `./scripts/run_full.sh`.
 
 ## What DeepATM does
 
@@ -142,7 +145,9 @@ python -m src.predict            # eDA scores for the 4,421 unevaluated SNVs
 ```
 
 Or run the whole thing unattended, which is what
-[`docs/aws-gpu-run.md`](docs/aws-gpu-run.md) walks through end to end:
+[`docs/kaggle-gpu-run.md`](docs/kaggle-gpu-run.md) (free, Kaggle's GPU tier) and
+[`docs/aws-gpu-run.md`](docs/aws-gpu-run.md) (a rented AWS instance) each walk
+through end to end:
 
 ```bash
 ./scripts/run_full.sh            # splits -> ClinVar -> train -> ablation
@@ -150,7 +155,8 @@ Or run the whole thing unattended, which is what
 ```
 
 Training checkpoints every epoch, so an interrupted run — spot reclamation,
-dropped SSH, OOM — is continued by issuing the same command again. Completed
+dropped SSH, OOM, a Kaggle session hitting its 12-hour cap — is continued by
+issuing the same command again. Completed
 folds are skipped and the in-progress fold restarts from its last epoch; a
 resumed run reproduces an uninterrupted one bit-for-bit
 (`tests/test_train.py`).
